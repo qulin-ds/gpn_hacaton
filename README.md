@@ -1,6 +1,6 @@
-# PDF Parsing Baseline (marker-pdf)
+# PDF Parsing Baseline (Docling)
 
-Baseline-решение для хакатона по парсингу PDF в Markdown на основе [marker-pdf](https://github.com/datalab-to/marker).
+Baseline-решение для хакатона по парсингу PDF в Markdown на основе [Docling](https://github.com/docling-project/docling).
 
 ## Структура репозитория
 
@@ -10,7 +10,7 @@ Baseline-решение для хакатона по парсингу PDF в Mar
 │       ├── pdfs/              — 100 PDF-документов (document_001.pdf … document_100.pdf)
 │       └── ground_truth/      — эталонные Markdown + images/
 ├── baseline/
-│   └── marker_baseline.py     — baseline на marker-pdf
+│   └── docling_baseline.py    — baseline на Docling
 ├── pyproject.toml
 └── README.md
 ```
@@ -30,7 +30,7 @@ uv sync
 Обработать все 100 PDF и сохранить результаты в `output/`:
 
 ```bash
-uv run baseline-marker \
+uv run baseline-docling \
     --input-dir dataset/public/pdfs \
     --output-dir dataset/public/baseline_results/
 ```
@@ -38,33 +38,53 @@ uv run baseline-marker \
 Для отладки можно ограничить число файлов:
 
 ```bash
-uv run baseline-marker \
+uv run baseline-docling \
     --input-dir dataset/public/pdfs \
     --output-dir dataset/public/baseline_results/ \
     --max-files 5
 ```
 
-### Скорость
-
-По умолчанию baseline задаёт для marker:
-
-- явные `device` и `dtype` из настроек marker (на CUDA — `bfloat16`);
-- на CUDA — внимание через SDPA (`attention_implementation="sdpa"`);
-- чуть пониженные DPI страниц (`88` / `144` вместо `96` / `192`), быстрее layout и детекция.
-
-Максимально быстро на PDF с нормальным текстовым слоем (без сканов):
+Продолжить после обрыва (Ctrl+C): не трогать уже записанные `.md` и запустить с `--skip-existing`.
 
 ```bash
-uv run baseline-marker \
+uv run baseline-docling \
     --input-dir dataset/public/pdfs \
     --output-dir dataset/public/baseline_results/ \
-    --no-ocr
+    --skip-existing
 ```
 
-Вернуть стандартные DPI (медленнее, потенциально точнее):
+При первом запуске baseline **заранее** загружает веса layout/OCR/table; это может занять несколько минут — не прерывайте процесс на этом этапе, иначе при следующем запуске загрузка начнётся снова.
+
+
+### Скорость и качество
+
+По умолчанию baseline задаёт для Docling:
+
+- `images_scale=0.88` и быстрый режим TableFormer (`FAST`);
+- извлечение встроенных картинок (`generate_picture_images=True`).
+
+Максимально быстро на PDF с нормальным текстовым слоем (без сканов и без тяжёлого TableFormer):
 
 ```bash
-uv run baseline-marker ... --full-dpi
+uv run baseline-docling \
+    --input-dir dataset/public/pdfs \
+    --output-dir dataset/public/baseline_results/ \
+    --no-ocr \
+    --no-table-structure
+```
+
+Если при старте падает импорт/инициализация таблиц (например, ошибка вокруг `cv2`), используйте `--no-table-structure`.
+
+Полное качество (медленнее):
+
+```bash
+uv run baseline-docling ... --full-quality
+```
+
+Устройство для инференса (кроме `auto` задаётся до импорта Docling):
+
+```bash
+uv run baseline-docling ... --device cpu
 ```
 
 ## Формат решения

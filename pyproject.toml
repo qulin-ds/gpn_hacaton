@@ -1,17 +1,17 @@
 [project]
 name = "pdf-parsing-baseline"
 version = "0.1.0"
-description = "Baseline (marker-pdf) для парсинга PDF в Markdown + публичный датасет"
+description = "Baseline (Docling) для парсинга PDF в Markdown + публичный датасет"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Hackathon Organizers" }]
 dependencies = [
-    "Pillow>=10,<11",
-    "marker-pdf>=1.10.2",
+    "docling>=2.0",
+    "opencv-python-headless>=4.8,<5",
 ]
 
 [project.scripts]
-baseline-marker = "baseline.marker_baseline:main"
+baseline-docling = "baseline.docling_baseline:main"
 
 [build-system]
 requires = ["hatchling"]
