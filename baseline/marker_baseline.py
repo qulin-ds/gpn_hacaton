@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import re
 import sys
@@ -12,11 +13,38 @@ os.environ.setdefault(
 )
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+
+def _apply_device_from_argv() -> None:
+    """``TORCH_DEVICE`` читается marker при импорте settings — задаём до импортов marker."""
+    for i, arg in enumerate(sys.argv):
+        if arg == "--device" and i + 1 < len(sys.argv):
+            val = sys.argv[i + 1]
+            if val != "auto":
+                os.environ["TORCH_DEVICE"] = val
+            return
+        if arg.startswith("--device="):
+            val = arg.split("=", 1)[1]
+            if val != "auto":
+                os.environ["TORCH_DEVICE"] = val
+            return
+
+
+_apply_device_from_argv()
 
 from marker.converters.pdf import PdfConverter
 from marker.models import create_model_dict
 from marker.output import convert_if_not_rgb, text_from_rendered
 from marker.settings import settings
+
+import torch
+
+
+def _clear_cuda_cache() -> None:
+    if torch.cuda.is_available():
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def _doc_num_from_stem(stem: str) -> int | None:
@@ -137,6 +165,13 @@ def main() -> None:
         action="store_true",
         help="Стандартные DPI страниц (96/192), медленнее",
     )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+        help="Устройство для моделей marker (auto = по умолчанию marker). "
+        "При CUDA OOM используйте cpu (медленнее, без VRAM).",
+    )
     args = parser.parse_args()
 
     if not args.input_dir.is_dir():
@@ -176,6 +211,8 @@ def main() -> None:
             print("OK")
         except Exception as e:
             print(f"ОШИБКА: {e}")
+        finally:
+            _clear_cuda_cache()
 
     print(f"\nГотово! Результаты: {args.output_dir}")
 
