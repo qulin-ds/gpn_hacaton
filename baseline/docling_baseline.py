@@ -54,7 +54,7 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.base import ImageRefMode
 
 _IMG_LINK_RE = re.compile(
-    r"images/(image_\d+_[a-f0-9]+\.png)",
+    r"images/(image_\d+_[a-f0-9]+\.(?:png|jpe?g))",
     flags=re.IGNORECASE,
 )
 
@@ -80,13 +80,26 @@ def _doc_num_from_stem(stem: str) -> int | None:
         return None
 
 
+def _move_or_convert_to_png(src: Path, dst: Path) -> None:
+    """Сохранить только PNG: JPEG конвертируем, остальное переносим как есть."""
+    ext = src.suffix.lower()
+    if ext in (".jpg", ".jpeg"):
+        from PIL import Image
+
+        with Image.open(src) as im:
+            im.save(dst, format="PNG")
+        src.unlink()
+    else:
+        shutil.move(str(src), str(dst))
+
+
 def _normalize_image_names(
     markdown: str,
     work_images_dir: Path,
     out_images_dir: Path,
     doc_num: int,
 ) -> str:
-    """Переименовать ``image_*_*.png`` в ``doc_<n>_image_<k>.png`` и обновить ссылки."""
+    """Переименовать ``image_*_*.(png|jpg)`` в ``doc_<n>_image_<k>.png`` и обновить ссылки."""
     out_images_dir.mkdir(parents=True, exist_ok=True)
     old_to_new: dict[str, str] = {}
     order = 1
@@ -99,7 +112,7 @@ def _normalize_image_names(
             continue
         new_name = f"doc_{doc_num}_image_{order}.png"
         old_to_new[old_name] = new_name
-        shutil.move(str(src), str(out_images_dir / new_name))
+        _move_or_convert_to_png(src, out_images_dir / new_name)
         order += 1
 
     out = markdown
