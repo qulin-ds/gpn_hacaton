@@ -9,12 +9,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Подавляем шумные логи библиотек
 os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
 os.environ.setdefault("GLOG_minloglevel", "2")
 
-
 def _apply_device_from_argv() -> None:
-    """Docling читает устройство из ``AcceleratorOptions`` / ``DOCLING_DEVICE``."""
+    """Передача параметра устройства в переменную окружения для Docling."""
     for i, arg in enumerate(sys.argv):
         if arg == "--device" and i + 1 < len(sys.argv):
             val = sys.argv[i + 1]
@@ -27,19 +27,16 @@ def _apply_device_from_argv() -> None:
                 os.environ["DOCLING_DEVICE"] = val
             return
 
-
 _apply_device_from_argv()
 
-
 def _patch_cv2_set_num_threads() -> None:
-    """TableFormer (docling-ibm-models) вызывает ``cv2.setNumThreads``; у подменного cv2 атрибута нет."""
+    """Хак для совместимости некоторых версий cv2."""
     try:
         import cv2
     except ImportError:
         return
     if not hasattr(cv2, "setNumThreads"):
-        cv2.setNumThreads = lambda _nthreads: None  # type: ignore[method-assign]
-
+        cv2.setNumThreads = lambda _nthreads: None
 
 _patch_cv2_set_num_threads()
 
@@ -53,111 +50,125 @@ from docling.datamodel.pipeline_options import (
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling_core.types.doc.base import ImageRefMode
 
-_IMG_LINK_RE = re.compile(
-    r"images/(image_\d+_[a-f0-9]+\.(?:png|jpe?g))",
-    flags=re.IGNORECASE,
-)
-
-
 def _clear_cuda_cache() -> None:
+    """Очистка памяти GPU после обработки файла."""
     try:
         import torch
+        if torch.cuda.is_available():
+            gc.collect()
+            torch.cuda.empty_cache()
     except ImportError:
-        return
-    if torch.cuda.is_available():
-        gc.collect()
-        torch.cuda.empty_cache()
+        pass
 
-
-def _doc_num_from_stem(stem: str) -> int | None:
-    """Как в evaluation: ``document_051`` → 51."""
+def _get_doc_id_from_stem(stem: str) -> str:
+    """
+    Извлекает ID документа из имени файла document_NNN.
+    Возвращает число без ведущих нулей (например, 'document_051' -> '51').
+    """
     parts = stem.rsplit("_", 1)
-    if len(parts) != 2:
-        return None
-    try:
-        return int(parts[1])
-    except ValueError:
-        return None
+    if len(parts) == 2:
+        try:
+            return str(int(parts[1]))
+        except ValueError:
+            pass
+    return "0"
 
-
-def _move_or_convert_to_png(src: Path, dst: Path) -> None:
-    """Сохранить только PNG: JPEG конвертируем, остальное переносим как есть."""
-    ext = src.suffix.lower()
-    if ext in (".jpg", ".jpeg"):
-        from PIL import Image
-
-        with Image.open(src) as im:
-            im.save(dst, format="PNG")
-        src.unlink()
-    else:
-        shutil.move(str(src), str(dst))
-
-
-def _normalize_image_names(
-    markdown: str,
-    work_images_dir: Path,
-    out_images_dir: Path,
-    doc_num: int,
-) -> str:
-    """Переименовать ``image_*_*.(png|jpg)`` в ``doc_<n>_image_<k>.png`` и обновить ссылки."""
-    out_images_dir.mkdir(parents=True, exist_ok=True)
-    old_to_new: dict[str, str] = {}
-    order = 1
-    for m in _IMG_LINK_RE.finditer(markdown):
-        old_name = m.group(1)
-        if old_name in old_to_new:
+def _fix_broken_words(text: str) -> str:
+    """
+    Исправляет артефакты PDF-парсинга:
+    1. Разделяет слипшиеся слова (OftenMy -> Often My).
+    2. Склеивает разорванные даты/числа (03.03.1 999 -> 03.03.1999).
+    3. Склеивает короткие окончания в таблицах (Наткнут ься -> Наткнуться).
+    """
+    lines = text.split('\n')
+    fixed_lines = []
+    
+    for line in lines:
+        # ЗАГОЛОВКИ MARKDOWN НЕ ТРОГАЕМ (чтобы не создать кашу из # ##)
+        if line.strip().startswith('#'):
+            # Только цифры в заголовках склеиваем
+            line = re.sub(r'(\d)\s+(\d)', r'\1\2', line)
+            fixed_lines.append(line)
             continue
-        src = work_images_dir / old_name
-        if not src.is_file():
+            
+        # --- ШАГ 1: Разделение слипшихся слов (CamelCase ошибки парсера) ---
+        # Если строчная буква идет сразу перед Заглавной (латиница или кириллица), вставляем пробел
+        # Пример: OftenMy -> Often My, SecurityArm -> Security Arm
+        line = re.sub(r'([a-zа-яё])([A-ZА-ЯЁ])', r'\1 \2', line)
+        
+        # --- ШАГ 2: Склейка цифр (даты, деньги, ID) ---
+        # Пример: 03.03.1 999 -> 03.03.1999, 897 659 -> 897659
+        line = re.sub(r'(\d)\s+(\d)', r'\1\2', line)
+        
+        # --- ШАГ 3: Склейка коротких "хвостов" слов в таблицах ---
+        # Логика: Если слово заканчивается на букву, затем пробел, 
+        # затем короткий хвост (1-3 строчные буквы), и после хвоста конец строки или знак препинания.
+        # Это чинит "Наткнут ься", "Переосмысленн ая", но не трогает "Дом Кот".
+        line = re.sub(r'(\w)\s+([a-zа-яё]{1,3})(?=\W|$)', r'\1\2', line)
+        
+        fixed_lines.append(line)
+        
+    return '\n'.join(fixed_lines)
+
+def _remove_headers_footers(text: str) -> str:
+    """
+    Удаляет колонтитулы и водяные знаки ГПН.
+    Основано на паттернах из document_001.pdf и document_093.pdf.
+    """
+    lines = text.split('\n')
+    cleaned_lines = []
+    
+    # Паттерны мусора из ТЗ и примеров
+    garbage_patterns = [
+        r"Patel-Stanley",
+        r"Hooper and Sons",
+        r"Object-based intangible hub",
+        r"Re-contextualized zero tolerance analyzer",
+        r"ЧЕРНОВИК",
+    ]
+    
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned_lines.append(line)
             continue
-        new_name = f"doc_{doc_num}_image_{order}.png"
-        old_to_new[old_name] = new_name
-        _move_or_convert_to_png(src, out_images_dir / new_name)
-        order += 1
+            
+        is_garbage = False
+        
+        # 1. Проверка по явным паттернам
+        for pattern in garbage_patterns:
+            if re.search(pattern, stripped, re.IGNORECASE):
+                is_garbage = True
+                break
+                
+        if is_garbage:
+            continue
 
-    out = markdown
-    for old_name, new_name in sorted(old_to_new.items(), key=lambda kv: len(kv[0]), reverse=True):
-        out = out.replace(f"images/{old_name}", f"images/{new_name}")
-    return out
+        # 2. Проверка на колонтитулы с датами и номерами страниц
+        # Примеры: "Patel-Stanley · решение · 1998-06-25 стр. 1"
+        #          "Hooper and Sons · привлекать · 2001-02-03 — 1 —"
+        #          "Hooper and Sons · привлекать · 2001-02-03 [ 2 ]"
+        #          "Hooper and Sons · привлекать · 2001-02-03 5/?"
+        if re.search(r'\d{2}\.\d{2}\.\d{4}', stripped):
+            if re.search(r'(стр\.|Page|— \d+ —|\[ \d+ \]|\d/\?)', stripped):
+                is_garbage = True
+        
+        # 3. Проверка на короткие строки с разделителями '·' (типичный колонтитул)
+        if '·' in stripped and len(stripped) < 150:
+             is_garbage = True
 
+        if not is_garbage:
+            cleaned_lines.append(line)
+            
+    return '\n'.join(cleaned_lines)
 
-def _build_converter(
-    no_ocr: bool,
-    no_table_structure: bool,
-    full_quality: bool,
-) -> DocumentConverter:
-    if full_quality:
-        images_scale = 1.0
-        table_opts = TableStructureOptions(mode=TableFormerMode.ACCURATE)
-    else:
-        images_scale = 0.88
-        table_opts = TableStructureOptions(mode=TableFormerMode.FAST)
-
-    pipeline_options = ThreadedPdfPipelineOptions(
-        do_ocr=not no_ocr,
-        do_table_structure=not no_table_structure,
-        generate_picture_images=True,
-        images_scale=images_scale,
-        table_structure_options=table_opts,
-        accelerator_options=AcceleratorOptions(),
-    ).model_copy(deep=True)
-    return DocumentConverter(
-        allowed_formats=[InputFormat.PDF],
-        format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-        },
-    )
-
-
-def convert_pdf(
-    pdf_path: Path,
-    output_dir: Path,
-    converter: DocumentConverter,
-) -> None:
+def convert_pdf(pdf_path: Path, output_dir: Path, converter: DocumentConverter) -> None:
     stem = pdf_path.stem
-    doc_num = _doc_num_from_stem(stem)
-    if doc_num is None:
-        doc_num = 1
+    doc_id = _get_doc_id_from_stem(stem)
+    
+    # Папка для картинок всех документов
+    images_out_dir = output_dir / "images"
+    images_out_dir.mkdir(parents=True, exist_ok=True)
 
     result = converter.convert(str(pdf_path))
     doc = result.document
@@ -165,113 +176,135 @@ def convert_pdf(
     with tempfile.TemporaryDirectory(prefix=f"docling_{stem}_") as tmp:
         work = Path(tmp)
         md_work = work / f"{stem}.md"
+        
+        # 1. Сохраняем Markdown во временную папку. 
+        # Картинки будут сохранены в work/images/
         doc.save_as_markdown(
             md_work,
-            artifacts_dir=Path("images"),
+            artifacts_dir=work / "images", 
             image_mode=ImageRefMode.REFERENCED,
         )
+        
         text = md_work.read_text(encoding="utf-8")
-        text = _normalize_image_names(
-            text,
-            work_images_dir=work / "images",
-            out_images_dir=output_dir / "images",
-            doc_num=doc_num,
-        )
+        
+        # 2. Пост-обработка текста
+        text = _fix_broken_words(text)
+        text = _remove_headers_footers(text)
+        
+        # 3. Перенос картинок и коррекция ссылок
+        artifact_dir = work / "images"
+        if artifact_dir.exists():
+            img_files = sorted(artifact_dir.glob("*"))
+            counter = 1
+            
+            for old_img_path in img_files:
+                if not old_img_path.is_file():
+                    continue
+                    
+                ext = old_img_path.suffix.lower()
+                if ext not in ['.png', '.jpg', '.jpeg']:
+                    ext = '.png'
+                    
+                # Формат имени: doc_<ID>_image_<N>.png (ТЗ требует ID без ведущих нулей)
+                new_filename = f"doc_{doc_id}_image_{counter}{ext}"
+                dst_path = images_out_dir / new_filename
+                
+                # Копируем файл
+                shutil.copy2(old_img_path, dst_path)
+                
+                # --- НАДЕЖНАЯ ЗАМЕНА ПУТЕЙ ---
+                # Docling может вставить: image_1.png, ./image_1.png, C:/Temp/.../image_1.png
+                # Мы должны заменить любое вхождение этого файла на images/new_filename
+                
+                old_name = old_img_path.name
+                new_rel_path = f"images/{new_filename}"
+                
+                # Экранируем имя файла для использования в regex
+                escaped_old_name = re.escape(old_name)
+                
+                # Паттерн ищет: необязательный путь (с прямыми или обратными слэшами), заканчивающийся именем файла
+                # Заменяем на новый относительный путь
+                # Также обрабатываем случай, когда ссылка уже частично заменена или имеет префикс
+                pattern = r'(?:.*[\\/])?' + escaped_old_name
+                text = re.sub(pattern, new_rel_path, text)
+                
+                # Дополнительная проверка: если в тексте осталось что-то вроде "images/image_1.png)" или "![](image_1.png)"
+                # Регулярка выше должна это покрыть, но на всякий случай проверим явные вхождения имени файла
+                if old_name in text:
+                     text = text.replace(old_name, new_rel_path)
+
+                counter += 1
+
+        # 4. Сохраняем итоговый MD
         out_md = output_dir / f"{stem}.md"
         out_md.write_text(text, encoding="utf-8")
 
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Baseline (Docling): PDF → Markdown")
-    parser.add_argument("--input-dir", type=Path, required=True, help="Директория с PDF")
-    parser.add_argument("--output-dir", type=Path, required=True, help="Каталог результатов")
-    parser.add_argument(
-        "--max-files",
-        type=int,
-        default=None,
-        help="Ограничить число файлов (для отладки)",
-    )
-    parser.add_argument(
-        "--no-ocr",
-        action="store_true",
-        help="Отключить OCR (быстрее на PDF с текстовым слоем; сканы будут хуже)",
-    )
-    parser.add_argument(
-        "--no-table-structure",
-        action="store_true",
-        help="Отключить TableFormer (быстрее; при проблемах с opencv/cv2)",
-    )
-    parser.add_argument(
-        "--full-quality",
-        action="store_true",
-        help="Полное качество: images_scale=1.0 и точные таблицы (медленнее)",
-    )
-    parser.add_argument(
-        "--device",
-        choices=("auto", "cpu", "cuda", "mps"),
-        default="auto",
-        help="Устройство для моделей Docling (auto = по умолчанию). "
-        "Задаётся до импорта через DOCLING_DEVICE.",
-    )
-    parser.add_argument(
-        "--skip-existing",
-        action="store_true",
-        help="Не обрабатывать PDF, если в output уже есть одноимённый .md (продолжение после обрыва).",
-    )
+    parser = argparse.ArgumentParser(description="GPN Hackathon Baseline (Docling)")
+    parser.add_argument("--input-dir", type=Path, required=True, help="Папка с PDF")
+    parser.add_argument("--output-dir", type=Path, required=True, help="Папка результатов")
+    parser.add_argument("--no-ocr", action="store_true", help="Отключить OCR (быстрее, но хуже текст)")
+    parser.add_argument("--no-table-structure", action="store_true", help="Отключить анализ структуры таблиц")
+    parser.add_argument("--max-files", type=int, default=None, help="Лимит файлов для теста")
     args = parser.parse_args()
 
-    if not args.input_dir.is_dir():
-        print(f"ОШИБКА: {args.input_dir} не является директорией", file=sys.stderr)
-        sys.exit(1)
-
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "images").mkdir(exist_ok=True)
 
     pdf_files = sorted(args.input_dir.glob("*.pdf"))
-    if args.max_files is not None:
-        pdf_files = pdf_files[: args.max_files]
+    if args.max_files:
+        pdf_files = pdf_files[:args.max_files]
 
     if not pdf_files:
-        print(f"ОШИБКА: нет PDF-файлов в {args.input_dir}", file=sys.stderr)
-        sys.exit(1)
+        print("Нет PDF файлов.")
+        return
 
-    if args.skip_existing:
-        before = len(pdf_files)
-        pdf_files = [p for p in pdf_files if not (args.output_dir / f"{p.stem}.md").is_file()]
-        skipped = before - len(pdf_files)
-        if skipped:
-            print(f"Пропуск (--skip-existing): уже есть {skipped} .md, к обработке {len(pdf_files)} PDF\n")
-        if not pdf_files:
-            print("Нечего обрабатывать (все .md уже есть).", flush=True)
-            sys.exit(0)
-
-    dev = os.environ.get("DOCLING_DEVICE", "auto")
-    print("Инициализация Docling…")
-    print(f"Устройство (DOCLING_DEVICE): {dev}", flush=True)
-    converter = _build_converter(
-        no_ocr=args.no_ocr,
-        no_table_structure=args.no_table_structure,
-        full_quality=args.full_quality,
+    print(f"Найдено {len(pdf_files)} файлов. Инициализация модели...")
+    
+    # Настройка пайплайна
+    # Приоритет ТЗ: Таблицы > Текст. Поэтому используем ACCURATE для таблиц и включаем OCR.
+    pipeline_options = ThreadedPdfPipelineOptions(
+        do_ocr=not args.no_ocr,
+        do_table_structure=not args.no_table_structure,
+        generate_picture_images=True,
+        images_scale=1.0, # Максимальное качество картинок
+        table_structure_options=TableStructureOptions(
+            mode=TableFormerMode.ACCURATE # Лучшее качество для сложных таблиц
+        ),
+        accelerator_options=AcceleratorOptions(),
     )
-    print(
-        "Загрузка весов layout/OCR/table (один раз, при первом обращении к pipeline) — "
-        "может занять несколько минут; не прерывайте этот шаг (иначе придётся грузить снова).",
-        flush=True,
+    
+    converter = DocumentConverter(
+        allowed_formats=[InputFormat.PDF],
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+        },
     )
-    converter.initialize_pipeline(InputFormat.PDF)
-    print(f"Найдено {len(pdf_files)} PDF-файлов\n")
 
-    for i, pdf_path in enumerate(pdf_files, 1):
-        print(f"[{i}/{len(pdf_files)}] {pdf_path.name}...", end=" ", flush=True)
+    # Прогрев модели на первом файле
+    if pdf_files:
+        print("Прогрев модели (может занять 1-2 минуты)...")
+        try:
+            convert_pdf(pdf_files[0], args.output_dir, converter)
+            print("Прогрев завершен. Обработка остальных файлов...\n")
+            remaining_files = pdf_files[1:]
+        except Exception as e:
+            print(f"Ошибка при прогреве: {e}")
+            remaining_files = pdf_files
+    else:
+        remaining_files = []
+
+    for i, pdf_path in enumerate(remaining_files, 1):
+        print(f"[{i}/{len(remaining_files)}] {pdf_path.name}...", end=" ", flush=True)
         try:
             convert_pdf(pdf_path, args.output_dir, converter)
             print("OK")
         except Exception as e:
-            print(f"ОШИБКА: {e}")
+            print(f"ERROR: {e}")
         finally:
             _clear_cuda_cache()
 
-    print(f"\nГотово! Результаты: {args.output_dir}")
-
+    print("\nГотово! Результаты в:", args.output_dir)
 
 if __name__ == "__main__":
     main()

@@ -6,8 +6,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Hackathon Organizers" }]
 dependencies = [
+    "beautifulsoup4>=4.14.3",
     "docling>=2.0",
+    "lxml>=6.0.4",
     "opencv-python-headless>=4.8,<5",
+    "python-levenshtein>=0.27.3",
+    "rapidfuzz>=3.14.5",
 ]
 
 [project.scripts]
