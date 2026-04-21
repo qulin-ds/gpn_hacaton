@@ -109,26 +109,8 @@ def _dedupe_row_cells_for_colspan(cells: list[str]) -> list[str]:
 
     Для TEDS обычно лучше оставить текст в первой ячейке серии и обнулить повторы.
     """
-    out = cells[:]
-    j = 0
-    while j < len(out):
-        val = out[j].strip()
-        if not val or len(val) < 9:
-            j += 1
-            continue
-        # Схлопываем только если есть пробелы/кириллица/латиница (не числа/проценты).
-        if not re.search(r"[A-Za-zА-Яа-яЁё]", val) or " " not in val:
-            j += 1
-            continue
-        k = j + 1
-        while k < len(out) and out[k].strip() == val:
-            k += 1
-        run = k - j
-        if run >= 2:
-            for t in range(j + 1, k):
-                out[t] = ""
-        j = k
-    return out
+    # Пользовательский режим: сохраняем дублирование "как есть".
+    return cells
 
 
 def _looks_like_same_table_header(a: str, b: str) -> bool:
