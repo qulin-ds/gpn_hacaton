@@ -1,95 +1,181 @@
 # PDF Parsing Baseline (Docling)
 
-Baseline-решение для хакатона по парсингу PDF в Markdown на основе [Docling](https://github.com/docling-project/docling).
+Baseline для хакатона: конвертация PDF -> Markdown с сохранением структуры документа.
+
+Решение использует [Docling](https://github.com/docling-project/docling) и добавляет постобработку под требования хакатона:
+
+- нормализация имен картинок в формат `doc_<id>_image_<order>.png`;
+- базовая очистка повторяющихся колонтитулов/маркеров страниц;
+- sanity-проверка результатов и сборка финального `submission.zip`.
+
+## Приоритет метрики (по уточнению организаторов)
+
+1. Таблицы
+2. Текст
+3. Структура
+4. Изображения
+
+Именно в таком порядке лучше вносить улучшения в пайплайн.
 
 ## Структура репозитория
 
 ```
+├── baseline/
+│   ├── docling_baseline.py   # основной пайплайн PDF -> MD
+│   ├── text_cleanup.py       # постобработка текста (шумы/колонтитулы)
+│   ├── table_cleanup.py      # нормализация Markdown-таблиц
+│   └── evaluate_md.py        # sanity-check + сравнение с эталоном + zip
 ├── dataset/
 │   └── public/
-│       ├── pdfs/              — 100 PDF-документов (document_001.pdf … document_100.pdf)
-│       └── ground_truth/      — эталонные Markdown + images/
-├── baseline/
-│   └── docling_baseline.py    — baseline на Docling
+│       ├── pdfs/
+│       └── ground_truth/     # если доступен в вашей копии
+├── evaluate.py               # обратная совместимость (делегирует в baseline.evaluate_md)
 ├── pyproject.toml
 └── README.md
 ```
 
 ## Быстрый старт
 
-### 1. Установка зависимостей
+### 1) Установка зависимостей
 
-Установите [uv](https://docs.astral.sh/uv/getting-started/installation/), затем:
+Вариант с `uv`:
 
 ```bash
 uv sync
 ```
 
-### 2. Запуск baseline
-
-Обработать все 100 PDF и сохранить результаты в `output/`:
+Вариант через `venv`:
 
 ```bash
-uv run baseline-docling \
-    --input-dir dataset/public/pdfs \
-    --output-dir dataset/public/baseline_results/
+python -m venv .venv
+.venv\Scripts\pip install -e .
 ```
 
-Для отладки можно ограничить число файлов:
+### 2) Запуск baseline
+
+**Для хакатона (таблицы важнее скорости):** по умолчанию включён **TableFormer** (`do_table_structure=True`). Не передавайте `--no-table-structure`, иначе таблицы из PDF часто превращаются в один абзац в виде `| ...весь текст... |` без колонок — как на ваших скриншотах.
+
+Пробный запуск (2-5 файлов):
 
 ```bash
-uv run baseline-docling \
-    --input-dir dataset/public/pdfs \
-    --output-dir dataset/public/baseline_results/ \
-    --max-files 5
+python -m baseline.docling_baseline ^
+  --input-dir dataset/public/pdfs ^
+  --output-dir output/run1 ^
+  --max-files 5
 ```
 
-Продолжить после обрыва (Ctrl+C): не трогать уже записанные `.md` и запустить с `--skip-existing`.
+Полный запуск (рекомендуется для сабмита):
 
 ```bash
-uv run baseline-docling \
-    --input-dir dataset/public/pdfs \
-    --output-dir dataset/public/baseline_results/ \
-    --skip-existing
+python -m baseline.docling_baseline ^
+  --input-dir dataset/public/pdfs ^
+  --output-dir output/full
 ```
 
-При первом запуске baseline **заранее** загружает веса layout/OCR/table; это может занять несколько минут — не прерывайте процесс на этом этапе, иначе при следующем запуске загрузка начнётся снова.
-
-
-### Скорость и качество
-
-По умолчанию baseline задаёт для Docling:
-
-- `images_scale=0.88` и быстрый режим TableFormer (`FAST`);
-- извлечение встроенных картинок (`generate_picture_images=True`).
-
-Максимально быстро на PDF с нормальным текстовым слоем (без сканов и без тяжёлого TableFormer):
+Только для отладки скорости (таблицы будут хуже):
 
 ```bash
-uv run baseline-docling \
-    --input-dir dataset/public/pdfs \
-    --output-dir dataset/public/baseline_results/ \
-    --no-ocr \
-    --no-table-structure
+python -m baseline.docling_baseline ^
+  --input-dir dataset/public/pdfs ^
+  --output-dir output/fast ^
+  --fast
 ```
 
-Если при старте падает импорт/инициализация таблиц (например, ошибка вокруг `cv2`), используйте `--no-table-structure`.
-
-Полное качество (медленнее):
+Продолжить после обрыва:
 
 ```bash
-uv run baseline-docling ... --full-quality
+python -m baseline.docling_baseline ^
+  --input-dir dataset/public/pdfs ^
+  --output-dir output/full ^
+  --skip-existing
 ```
 
-Устройство для инференса (кроме `auto` задаётся до импорта Docling):
+### 3) Параметры качества/скорости
+
+- `--no-ocr` - быстрее на PDF с текстовым слоем.
+- `--ocr-mode {auto,on,off}` - режим OCR:
+  - `auto` (по умолчанию): если в PDF есть текстовый слой, OCR выключается для этого файла;
+  - `on`: всегда OCR;
+  - `off`: всегда без OCR.
+- `--ocr-languages ru,en` - языки OCR (для кириллицы держите `ru,en`).
+- `--no-table-structure` - быстрее; **сильно ломает таблицы** (лучше не использовать для финального решения).
+- `--fast` - сочетание `--no-ocr` и `--no-table-structure` для быстрых прогонов.
+- `--full-quality` - более точные таблицы, но медленнее.
+- `--device {auto,cpu,cuda,mps}` - выбор устройства.
+- `--no-text-cleanup` - отключить эвристики очистки повторов в тексте.
+
+Важно: первый запуск может быть долгим из-за загрузки весов layout/OCR/table.
+
+Для вашей проблемы с «ломающейся» кириллицей в таблицах рекомендуется:
 
 ```bash
-uv run baseline-docling ... --device cpu
+python -m baseline.docling_baseline ^
+  --input-dir dataset/public/pdfs ^
+  --output-dir output/full ^
+  --ocr-mode auto ^
+  --ocr-languages ru,en
 ```
 
-## Формат решения
+Это уменьшает OCR-ошибки в цифровых PDF и сохраняет OCR для сканов.
 
-Решение принимает директорию с PDF и создаёт директорию с `.md`-файлами:
+### Windows и картинки
+
+В `docling_baseline.py` ссылки на изображения приводятся к виду `images/doc_<id>_image_<k>.png` (прямые слеши), файлы копируются в `output/.../images/`. Это нужно, чтобы не оставались абсолютные пути во временной папке и чтобы проверка «локальные ссылки -> существующий файл» проходила.
+
+## Локальная проверка качества
+
+Sanity-check по результатам:
+
+```bash
+python -m baseline.evaluate_md --input-dir output/full
+```
+
+Если есть эталонный каталог `ground_truth`, можно смотреть текстовое сходство:
+
+```bash
+python -m baseline.evaluate_md ^
+  --input-dir output/full ^
+  --ground-truth-dir dataset/public/ground_truth
+```
+
+## Сборка submission.zip
+
+Архив должен содержать только:
+
+- `document_*.md`
+- `images/*.png`
+
+Команда:
+
+```bash
+python -m baseline.evaluate_md --help
+build-submission --source-dir output/full --output submission.zip
+```
+
+Либо напрямую из Python:
+
+```python
+from pathlib import Path
+from baseline.evaluate_md import build_submission_zip
+build_submission_zip(Path("output/full"), Path("submission.zip"))
+```
+
+## Архитектура пайплайна
+
+```mermaid
+flowchart LR
+  inputPdfs[InputPdfs] --> doclingConvert[DoclingConvert]
+  doclingConvert --> mdArtifacts[RawMarkdownAndImages]
+  mdArtifacts --> imageRename[NormalizeImageNames]
+  imageRename --> textCleanup[OptionalTextCleanup]
+  textCleanup --> finalMd[FinalMarkdown]
+  imageRename --> finalImages[FinalImages]
+  finalMd --> localEval[LocalSanityCheck]
+  finalImages --> localEval
+  localEval --> submissionZip[SubmissionZip]
+```
+
+## Формат выхода
 
 ```
 output/
@@ -103,5 +189,6 @@ output/
     └── ...
 ```
 
-Имена `.md`-файлов должны совпадать с PDF (`document_001.pdf` → `document_001.md`).
-Изображения — в подкаталоге `images/` с именами `doc_<n>_image_<k>.<ext>`, где `n` — номер документа без ведущих нулей, `k` — порядковый номер рисунка.
+- имя `.md` совпадает с PDF (`document_001.pdf` -> `document_001.md`);
+- картинки строго в `images/` и с именами `doc_<id>_image_<order>.png`;
+- `<id>` без ведущих нулей.
